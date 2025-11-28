@@ -211,7 +211,7 @@ def create_vector_db(documents: List[Document],
     # Embeddings
     embeddings = OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
-        api_key=OPENAI_API_KEY,
+        api_key=API_KEY,
         base_url=OPENAI_BASE_URL
     )
     
