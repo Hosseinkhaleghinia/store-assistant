@@ -564,7 +564,7 @@ from langchain_core.messages import (
     AIMessage,
     trim_messages,
 )
-from langchain_core.tools import create_retriever_tool
+from langchain_core.tools import tool  # <--- این مهمه: ایمپورت tool
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
@@ -609,21 +609,29 @@ def load_vector_stores():
 # بخش 2: ساخت Retriever Tools
 # ============================================
 def create_retriever_tools(products_store, articles_store):
+    """ساخت ابزارهای بازیابی (روش صریح با @tool برای رفع ارور TypeError)"""
+    
+    # تعریف رتریورها
     products_retriever = products_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
     articles_retriever = articles_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
 
-    products_tool = create_retriever_tool(
-        retriever=products_retriever,
-        name="products_retriever",
-        description="ابزار جستجو در محصولات فروشگاه...",
-    )
-    articles_tool = create_retriever_tool(
-        retriever=articles_retriever,
-        name="articles_retriever",
-        description="ابزار جستجو در مقالات راهنما...",
-    )
-    return products_tool, articles_tool
+    # 1. تعریف ابزار محصولات به صورت تابع صریح
+    @tool
+    def products_retriever_tool(query: str):
+        """ابزار جستجو در محصولات فروشگاه. برای یافتن اطلاعات محصولات، قیمت، موجودی و مشخصات فنی استفاده کن."""
+        return products_retriever.invoke(query)
 
+    # 2. تعریف ابزار مقالات به صورت تابع صریح
+    @tool
+    def articles_retriever_tool(query: str):
+        """ابزار جستجو در مقالات راهنما. برای راهنمایی خرید، نکات و مشاوره استفاده کن."""
+        return articles_retriever.invoke(query)
+
+    # تنظیم نام دقیق (حیاتی برای مدل زبانی)
+    products_retriever_tool.name = "products_retriever"
+    articles_retriever_tool.name = "articles_retriever"
+
+    return products_retriever_tool, articles_retriever_tool
 # ============================================
 # بخش 3: مدل‌های زبانی
 # ============================================
