@@ -21,5 +21,7 @@ pydantic>=2.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 
+python-multipart
+
 # Additional dependencies (if needed)
 # typing-extensions>=4.8.0  # Usually comes with Python 3.8+, but explicit is better
