@@ -1,0 +1,7 @@
+{
+  "name": "Store Assistant RAG",
+  "description": "A modern, RAG-based AI store assistant with Persian voice and text support.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

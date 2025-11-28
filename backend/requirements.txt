@@ -1,0 +1,25 @@
+# Environment variables
+python-dotenv>=1.0.0
+
+# LangChain Core
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-text-splitters>=0.3.0
+langchain-chroma>=0.1.0
+
+# LangGraph for agent workflow
+langgraph>=0.2.0
+
+# Vector Database
+chromadb>=0.5.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Additional dependencies (if needed)
+# typing-extensions>=4.8.0  # Usually comes with Python 3.8+, but explicit is better
