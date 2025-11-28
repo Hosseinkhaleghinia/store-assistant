@@ -1,3 +1,15 @@
+---
+title: Store Assistant Backend
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+# Store Assistant Backend API
+This is the backend for the RAG Store Assistant, built with FastAPI and LangGraph.
+
 # Store Assistant AI 🤖
 
 An intelligent RAG-based assistant that provides smart answers to customers about products and services using AI.
