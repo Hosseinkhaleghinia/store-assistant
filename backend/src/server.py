@@ -20,7 +20,7 @@ from src.rag_agent import (
     create_agent_graph, 
     transcribe_audio_file
 )
-from config import Colors
+from src.config import Colors
 
 # 1. راه‌اندازی FastAPI
 app = FastAPI(title="Store Assistant API", version="1.0.0")
