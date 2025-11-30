@@ -24,8 +24,12 @@ from pydantic import BaseModel, Field
 
 try:
     from config import *
+    from tts_handler import text_to_speech  # 🆕 اضافه کن
+
 except ImportError:
     from src.config import *
+    from src.tts_handler import text_to_speech  # 🆕 اضافه کن
+
 
 # ============================================
 # متغیرهای سراسری
@@ -39,7 +43,9 @@ articles_tool = None
 class AgentState(MessagesState):
     """State با قابلیت دریافت فایل صوتی و شمارش تلاش‌ها"""
     audio_path: Optional[str] = None
-    retry_count: int = 0  # <--- جدید: برای جلوگیری از حلقه بی‌پایان
+    audio_output_path: Optional[str] = None  # 🆕 برای خروجی صوتی
+    enable_tts: bool = False  # 🆕 کنترل فعال/غیرفعال
+    retry_count: int = 0
 
 # ============================================
 # توابع کمکی (Helper Functions)
@@ -302,12 +308,50 @@ def generate_answer(state: AgentState):
 دستورالعمل:
 1. فقط با توجه به اطلاعات بالا جواب بده.
 2. اگر اطلاعاتی نیست، بگو "در حال حاضر اطلاعاتی ندارم".
-3. خلاصه و مفید جواب بده."""
+3. خلاصه و مفید جواب بده.
+4. با لحن محاوره‌ای و دوستانه جواب بده و سعی کن از (،) و (.) و علائم دیگه هم استفاده کنی """
 
     response = llm.invoke([{"role": "user", "content": answer_prompt}])
     
     # بعد از پاسخ دادن، شمارنده رو صفر کن برای سوال بعدی
     return {"messages": [response], "retry_count": 0}
+
+
+def generate_audio_output(state: AgentState):
+    """
+    نود خروجی: تبدیل پاسخ نهایی به صوت
+    فقط در صورتی که enable_tts=True باشه اجرا میشه
+    """
+    
+    # چک کردن فعال بودن TTS
+    if not state.get("enable_tts", False):
+        log_step("TTS", "خروجی صوتی غیرفعال است")
+        return {}
+    
+    # پیدا کردن آخرین پاسخ AI
+    last_ai_message = None
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, AIMessage):
+            last_ai_message = msg
+            break
+    
+    if not last_ai_message or not last_ai_message.content:
+        log_warning("پیامی برای تبدیل به صوت یافت نشد")
+        return {}
+    
+    log_step("TTS", "🔊 شروع تولید خروجی صوتی...")
+    
+    # تبدیل به صوت
+    audio_path = text_to_speech(
+        text=last_ai_message.content,
+        model="gemini-2.5-flash-preview-tts",
+        add_emotion=True  # لحن دوستانه
+    )
+    
+    if audio_path:
+        return {"audio_output_path": audio_path}
+    
+    return {}
 
 
 # ============================================
@@ -325,17 +369,24 @@ def create_agent_graph(p_tool, a_tool):
     workflow.add_node("retrieve", ToolNode([products_tool, articles_tool]))
     workflow.add_node("rewrite_question", rewrite_question)
     workflow.add_node("generate_answer", generate_answer)
+    workflow.add_node("audio_output", generate_audio_output)# 🆕 نود جدید TTS
 
     workflow.add_edge(START, "check_audio")
     workflow.add_edge("check_audio", "generate_query_or_respond")
     
+    # 🔴 اصلاح مهم اینجاست:
+    # اگر ابزار خواست -> برو retrieve
+    # اگر تمام شد (پاسخ مستقیم داد) -> برو audio_output (نه END)
     workflow.add_conditional_edges(
         "generate_query_or_respond", 
         tools_condition, 
-        {"tools": "retrieve", END: END}
+        {"tools": "retrieve", END: "audio_output"} 
     )
+    
     workflow.add_conditional_edges("retrieve", grade_documents)
-    workflow.add_edge("generate_answer", END)
+    
+    workflow.add_edge("generate_answer", "audio_output")
+    workflow.add_edge("audio_output", END) # پایان واقعی اینجاست
     workflow.add_edge("rewrite_question", "generate_query_or_respond")
 
     memory = MemorySaver()
