@@ -1,6 +1,6 @@
 """
-Store Assistant RAG Agent - Logic Core (Optimized)
-بهینه شده برای کاهش مصرف توکن و جلوگیری از حلقه‌های بی‌پایان.
+Store Assistant RAG Agent - Core Logic
+Optimized for reduced token consumption and loop prevention.
 """
 
 import os
@@ -14,7 +14,7 @@ from langchain_core.messages import (
     HumanMessage,
     AIMessage,
     trim_messages,
-    BaseMessage
+    BaseMessage,
 )
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, MessagesState, START, END
@@ -24,83 +24,157 @@ from pydantic import BaseModel, Field
 
 try:
     from config import *
-    from tts_handler import text_to_speech  # 🆕 اضافه کن
-
+    from tts_handler import text_to_speech
 except ImportError:
     from src.config import *
-    from src.tts_handler import text_to_speech  # 🆕 اضافه کن
+    from src.tts_handler import text_to_speech
 
 
 # ============================================
-# متغیرهای سراسری
+# Global Variables
 # ============================================
 products_tool = None
 articles_tool = None
 
-# ============================================
-# تعریف State (بهینه شده)
-# ============================================
-class AgentState(MessagesState):
-    """State با قابلیت دریافت فایل صوتی و شمارش تلاش‌ها"""
-    audio_path: Optional[str] = None
-    audio_output_path: Optional[str] = None  # 🆕 برای خروجی صوتی
-    enable_tts: bool = False  # 🆕 کنترل فعال/غیرفعال
-    retry_count: int = 0
 
 # ============================================
-# توابع کمکی (Helper Functions)
+# State Definition
 # ============================================
+class AgentState(MessagesState):
+    """State with audio input/output support and retry counter"""
+    audio_path: Optional[str] = None
+    audio_output_path: Optional[str] = None
+    enable_tts: bool = False
+    retry_count: int = 0
+
+
+# ============================================
+# Helper Functions
+# ============================================
+def _extract_store_context(store_name: str) -> str:
+    """
+    Extract store type/context from store name.
+    Examples:
+        "موبایل استقلال" -> "mobile phone and electronics"
+        "لباس پرسپولیس" -> "clothing and fashion"
+        "کتاب آزادی" -> "book"
+    """
+    store_lower = store_name.lower()
+    
+    # Define keywords for different store types
+    mobile_keywords = ["موبایل", "mobile", "گوشی", "phone", "لپتاپ", "laptop", "تبلت", "tablet"]
+    clothing_keywords = ["لباس", "پوشاک", "clothing", "fashion", "مد"]
+    book_keywords = ["کتاب", "book", "کتابخانه"]
+    electronics_keywords = ["الکترونیک", "electronic", "دیجیتال", "digital"]
+    
+    # Check for mobile/electronics store
+    if any(keyword in store_lower for keyword in mobile_keywords):
+        return "mobile phone, laptop, tablet and electronics"
+    
+    # Check for clothing store
+    if any(keyword in store_lower for keyword in clothing_keywords):
+        return "clothing and fashion"
+    
+    # Check for book store
+    if any(keyword in store_lower for keyword in book_keywords):
+        return "book and publication"
+    
+    # Check for general electronics
+    if any(keyword in store_lower for keyword in electronics_keywords):
+        return "electronics and technology"
+    
+    # Default: try to use the store name itself as context
+    return f"{store_name} products"
+
+
 def get_trimmed_history(messages: list[BaseMessage], max_tokens=2000):
     """
-    تاریخچه را به شدت کوتاه می‌کند تا در هزینه صرفه‌جویی شود.
-    فقط سیستم پرامپت + چند پیام آخر را نگه می‌دارد.
+    Aggressively trim message history to save costs.
+    Keeps only system prompt + last few messages.
     """
     return trim_messages(
         messages,
         max_tokens=max_tokens,
         strategy="last",
-        token_counter=len, # شمارش حدودی بر اساس تعداد پیام
+        token_counter=len,
         include_system=True,
-        start_on="human"
+        start_on="human",
     )
 
+
+def custom_router(state):
+    """
+    Custom routing function that:
+    1. Checks if tools are needed (via tools_condition)
+    2. Routes to audio output if TTS is enabled
+    3. Otherwise ends the conversation
+    """
+    decision = tools_condition(state)
+
+    if decision == "tools":
+        return "retrieve"
+
+    if state.get("enable_tts", False):
+        return "audio_output"
+
+    return END
+
+
+def route_after_answer(state):
+    """Route to audio output if TTS is enabled, otherwise end"""
+    if state.get("enable_tts", False):
+        return "audio_output"
+    return END
+
+
 # ============================================
-# بخش 1: بارگذاری Vector Stores
+# Vector Store Initialization
 # ============================================
 def load_vector_stores():
-    log_step("LOAD", "شروع بارگذاری Vector Stores...")
+    """Load and initialize Chroma vector stores for products and articles"""
+    log_step("LOAD", "Loading vector stores...")
+    
     embeddings = OpenAIEmbeddings(
-        model=EMBEDDING_MODEL, api_key=API_KEY, base_url=OPENAI_BASE_URL
+        model=EMBEDDING_MODEL, 
+        api_key=API_KEY, 
+        base_url=OPENAI_BASE_URL
     )
+    
     products_store = Chroma(
         collection_name=PRODUCTS_COLLECTION,
         embedding_function=embeddings,
         persist_directory=str(PRODUCTS_CHROMA_DIR),
     )
+    
     articles_store = Chroma(
         collection_name=ARTICLES_COLLECTION,
         embedding_function=embeddings,
         persist_directory=str(ARTICLES_CHROMA_DIR),
     )
-    log_success("Vector stores بارگذاری شد")
+    
+    log_success("Vector stores loaded successfully")
     return products_store, articles_store
 
+
 # ============================================
-# بخش 2: ساخت Retriever Tools
+# Retriever Tools
 # ============================================
 def create_retriever_tools(products_store, articles_store):
-    # k=2 کردیم که توکن کمتری مصرف بشه (قبلا 3 بود)
+    """
+    Create retriever tools for products and articles.
+    k=2 for lower token consumption (previously k=3)
+    """
     products_retriever = products_store.as_retriever(search_kwargs={"k": 2})
     articles_retriever = articles_store.as_retriever(search_kwargs={"k": 2})
 
     @tool
     def products_retriever_tool(query: str):
-        """جستجو در محصولات (موبایل، لپتاپ و...). قیمت و موجودی را برمی‌گرداند."""
+        """Search products database (mobile, laptop, etc.). Returns price and availability."""
         return products_retriever.invoke(query)
 
     @tool
     def articles_retriever_tool(query: str):
-        """جستجو در مقالات و راهنمای خرید."""
+        """Search articles and buying guides."""
         return articles_retriever.invoke(query)
 
     products_retriever_tool.name = "products_retriever"
@@ -108,18 +182,27 @@ def create_retriever_tools(products_store, articles_store):
 
     return products_retriever_tool, articles_retriever_tool
 
+
 # ============================================
-# بخش 3: مدل‌های زبانی
+# Language Models
 # ============================================
 class GradeDocuments(BaseModel):
+    """Schema for document grading"""
     binary_score: str = Field(description="'yes' or 'no'")
 
+
 def gpt_4o_mini():
+    """Initialize GPT-4o-mini model"""
     return ChatOpenAI(
-        model=CHAT_GPT_MODEL, api_key=API_KEY, base_url=OPENAI_BASE_URL, temperature=0
+        model=CHAT_GPT_MODEL, 
+        api_key=API_KEY, 
+        base_url=OPENAI_BASE_URL, 
+        temperature=0
     )
 
+
 def gemini_2_flash():
+    """Initialize Gemini 2 Flash model"""
     return ChatGoogleGenerativeAI(
         model=CHAT_GEMINI_MODEL,
         google_api_key=API_KEY,
@@ -128,89 +211,125 @@ def gemini_2_flash():
         temperature=0.7,
     )
 
+
 # ============================================
-# بخش 4: پردازش صوت
+# Audio Processing
 # ============================================
 def transcribe_audio_file(file_path: str) -> str:
+    """
+    Transcribe audio file using Gemini with vision/audio capabilities.
+    Supports: mp3, ogg, wav, webm
+    """
     if not file_path or not os.path.exists(file_path):
         return ""
+    
     try:
         llm = gemini_2_flash()
+        
+        # Determine MIME type
         mime_type = "audio/mp3"
-        if file_path.endswith(".ogg"): mime_type = "audio/ogg"
-        elif file_path.endswith(".wav"): mime_type = "audio/wav"
-        elif file_path.endswith(".webm"): mime_type = "audio/webm"
+        if file_path.endswith(".ogg"):
+            mime_type = "audio/ogg"
+        elif file_path.endswith(".wav"):
+            mime_type = "audio/wav"
+        elif file_path.endswith(".webm"):
+            mime_type = "audio/webm"
 
+        # Read and encode audio
         with open(file_path, "rb") as audio_file:
             audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
 
-        # پرامپت کوتاه‌تر برای کاهش توکن ورودی جمینای
-        strict_prompt = "فقط متن این صوت را بنویس (Transcription). بدون هیچ توضیح اضافه."
-        
+        # Concise prompt to reduce input tokens
+        strict_prompt = "Transcribe this audio to text only. No additional explanation."
+
         message = HumanMessage(
             content=[
                 {"type": "text", "text": strict_prompt},
                 {"type": "media", "mime_type": mime_type, "data": audio_b64},
             ]
         )
-        logger.info(f"{Colors.CYAN}🎤 تبدیل صدا...{Colors.END}")
+        
+        logger.info(f"{Colors.CYAN}🎤 Transcribing audio...{Colors.END}")
         response = llm.invoke([message])
         return response.content.strip()
+        
     except Exception as e:
-        log_error(f"خطا در تبدیل صدا: {e}")
+        log_error(f"Audio transcription error: {e}")
         return ""
 
+
 def check_audio_input(state: AgentState):
+    """
+    Check for audio input and transcribe if present.
+    First node in the graph.
+    """
     audio_path = state.get("audio_path")
+    
     if audio_path and os.path.exists(audio_path):
         transcribed_text = transcribe_audio_file(audio_path)
+        
         if transcribed_text:
-            return {"messages": [HumanMessage(content=transcribed_text)], "audio_path": None}
+            return {
+                "messages": [HumanMessage(content=transcribed_text)],
+                "audio_path": None,
+                "audio_output_path": None,
+            }
         else:
             return {
-                "messages": [HumanMessage(content="متاسفانه صدا واضح نبود.")],
-                "audio_path": None
-            }    
+                "messages": [HumanMessage(content="Sorry, audio was unclear.")],
+                "audio_path": None,
+                "audio_output_path": None, 
+            }
+    
     return {}
 
-# ============================================
-# بخش 5: Agent Nodes (بهینه شده)
-# ============================================
 
+# ============================================
+# Agent Nodes
+# ============================================
 def generate_query_or_respond(state: AgentState):
-    """تصمیم‌گیری: جستجو یا پاسخ"""
-    log_step("QUERY", "تحلیل درخواست...")
-    
-    # ریست کردن شمارنده در ابتدای هر درخواست جدید کاربر
-    # (اگر آخرین پیام مال کاربر باشه، یعنی شروع سیکل جدیده)
-    if isinstance(state["messages"][-1], HumanMessage):
-        # اما چون State ایمیوتبل نیست، اینجا فقط پاس میدیم، ریست واقعی باید هوشمندتر باشه
-        # فعلا فرض میکنیم اگر human message دیدیم یعنی کاربر جدید حرف زده
-        pass 
+    """
+    Main decision node: Determine whether to search or respond directly.
+    Uses tools (products/articles retrievers) if needed.
+    """
+    log_step("QUERY", "Analyzing request...")
 
+    # Check for user message
     has_user = any(isinstance(msg, HumanMessage) for msg in state["messages"])
     if not has_user:
-        return {"messages": [AIMessage(content="پیامی دریافت نشد.")]}
+        return {"messages": [AIMessage(content="No message received.")]}
 
     llm = gpt_4o_mini()
-    
-    # پرامپت فشرده‌تر برای کاهش توکن
-    system_prompt = f"""تو دستیار فروشگاه {STORE_NAME} هستی.
-وظایف: پاسخ به سوالات محصولات، قیمت و موجودی.
-ابزارها: products_retriever, articles_retriever.
-قوانین:
-1. فقط از ابزارها اطلاعات بگیر.
-2. اگر در ابزار نبود، بگو "موجود نداریم" (دروغ نگو).
-3. اگر سوال عمومی بود، خودت جواب بده."""
 
-    # محدودیت شدید روی تاریخچه (فقط 4-5 پیام آخر)
+    # Extract store context from name (e.g., "موبایل استقلال" -> mobile store)
+    store_context = _extract_store_context(STORE_NAME)
+
+    # Enhanced system prompt with store context
+    system_prompt = f"""You are an assistant for "{STORE_NAME}" - {store_context}.
+
+IMPORTANT: Your store name is "{STORE_NAME}" and you should freely share this name when customers ask about it. This is public information and there's no reason to hide it.
+
+Your role:
+- Answer questions about our {store_context} products, prices, and availability
+- Use products_retriever for product searches
+- Use articles_retriever for guides and articles
+- Always introduce yourself with the store name when appropriate
+
+Rules:
+1. ONLY use information from the retrieval tools for specific product details
+2. If information is not in the tools, say "We don't have that information currently"
+3. Never make up prices, availability, or product details
+4. For general questions about {store_context} or the store itself, answer directly
+5. Always maintain context that you work for "{STORE_NAME}" - a {store_context} store"""
+
+    # Aggressive history trimming (only last 4-5 messages)
     trimmed_msgs = get_trimmed_history(state["messages"], max_tokens=2000)
     messages = [SystemMessage(content=system_prompt)] + trimmed_msgs
 
-    # اگر تعداد تلاش‌ها زیاد شده، ابزارها را می‌بندیم که دیگه سرچ نکنه
+    # Prevent infinite loops: disable tools after 2 retries
     if state.get("retry_count", 0) >= 2:
-        log_warning("تعداد تلاش زیاد شد. پاسخ مستقیم بدون ابزار.")
-        response = llm.invoke(messages) # بدون ابزار
+        log_warning("Retry limit reached. Direct response without tools.")
+        response = llm.invoke(messages)
     else:
         if products_tool and articles_tool:
             response = llm.bind_tools([products_tool, articles_tool]).invoke(messages)
@@ -220,33 +339,43 @@ def generate_query_or_respond(state: AgentState):
     return {"messages": [response]}
 
 
-def grade_documents(state: AgentState) -> Literal["generate_answer", "rewrite_question"]:
-    """کیفیت سنجی با محدودیت حلقه"""
-    log_step("GRADE", "بررسی مدارک...")
-    
-    # 1. اگر تعداد تلاش‌ها بیشتر از 1 بار شده، دیگه سخت نگیر و برو جواب بده
-    # (حتی اگر مدارک عالی نیست، بهتر از هیچیه یا اینکه بگه ندارم)
+def grade_documents(
+    state: AgentState,
+) -> Literal["generate_answer", "rewrite_question"]:
+    """
+    Grade document relevance with loop protection.
+    After 1 retry, proceed to answer even if documents aren't perfect.
+    """
+    log_step("GRADE", "Grading documents...")
+
+    # Loop protection: after 1 retry, proceed to answer
     current_retry = state.get("retry_count", 0)
     if current_retry >= 1:
-        log_warning(f"تلاش {current_retry}: عبور از سخت‌گیری.")
+        log_warning(f"Retry {current_retry}: Skipping strict grading.")
         return "generate_answer"
 
-    tool_msgs = [msg for msg in state["messages"] if hasattr(msg, 'type') and msg.type == 'tool']
+    # Extract tool messages
+    tool_msgs = [
+        msg for msg in state["messages"] if hasattr(msg, "type") and msg.type == "tool"
+    ]
+    
     if not tool_msgs:
         return "rewrite_question"
 
     llm = gpt_4o_mini()
-    question = state["messages"][0].content
     
-    # فقط 1000 کاراکتر اول مدارک رو برای چک کردن بفرست (صرفه‌جویی)
+    # Find original question
+    question = state["messages"][0].content
+
+    # Preview first 1000 chars of context for grading (cost savings)
     context_preview = "\n".join([msg.content[:1000] for msg in tool_msgs])
 
-    grade_prompt = f"""سوال: {question}
-مدارک: {context_preview}
-آیا این مدارک به سوال ربط دارند؟ (yes/no)"""
-    
+    grade_prompt = f"""Question: {question}
+Context: {context_preview}
+Are these documents relevant to the question? (yes/no)"""
+
     response = llm.invoke([{"role": "user", "content": grade_prompt}])
-    
+
     if "yes" in response.content.lower():
         return "generate_answer"
     else:
@@ -254,148 +383,198 @@ def grade_documents(state: AgentState) -> Literal["generate_answer", "rewrite_qu
 
 
 def rewrite_question(state: AgentState):
-    """بازنویسی سوال (با افزایش شمارنده)"""
-    log_step("REWRITE", "تلاش مجدد...")
-    
-    # افزایش شمارنده
+    """
+    Rewrite question for better retrieval.
+    Increments retry counter to prevent loops.
+    """
+    log_step("REWRITE", "Rewriting query...")
+
+    # Increment retry counter
     new_count = state.get("retry_count", 0) + 1
-    
+
     llm = gpt_4o_mini()
-    original_q = state["messages"][0].content
-    
-    msg = f"سوال '{original_q}' را برای جستجوی بهتر بازنویسی کن (فقط متن سوال جدید)."
+
+    # Find last human message (original question)
+    messages = state["messages"]
+    last_human_message = next(
+        (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+    )
+
+    if last_human_message:
+        original_q = last_human_message.content
+    else:
+        original_q = messages[-1].content
+
+    logger.info(f"Original Question: {original_q}")
+
+    # Concise rewrite prompt
+    msg = (
+        f"Improve this question for better product database search. "
+        f"Write only the improved question, no explanation.\n"
+        f"Original: {original_q}"
+    )
+
     response = llm.invoke(msg)
-    
-    logger.info(f"{Colors.GREEN}سوال جدید ({new_count}): {response.content}{Colors.END}")
-    
+
+    logger.info(
+        f"{Colors.GREEN}Rewritten question ({new_count}): {response.content}{Colors.END}"
+    )
+
     return {
         "messages": [HumanMessage(content=response.content)],
-        "retry_count": new_count # آپدیت استیت
+        "retry_count": new_count,
     }
 
 
 def generate_answer(state: AgentState):
-    """تولید پاسخ نهایی با کانتکست محدود"""
-    log_step("ANSWER", "تولید پاسخ...")
-    llm = gpt_4o_mini()
+    """
+    Generate final answer with limited context to reduce token usage.
+    Resets retry counter for next user query.
+    """
+    log_step("ANSWER", "Generating response...")
     
-    # استخراج سوال اصلی (نه بازنویسی شده‌ها)
-    # معمولاً اولین HumanMessage سوال اصلیه، یا آخرین قبل از ابزار
-    question = "سوال کاربر"
+    llm = gpt_4o_mini()
+
+    # Extract original user question
+    question = "User question"
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             question = msg.content
             break
 
-    # جمع‌آوری و محدودسازی مدارک
+    # Collect and limit context (prevent token explosion)
     tool_contents = []
     for msg in state["messages"]:
         if hasattr(msg, "type") and msg.type == "tool":
-            # فقط 500 کاراکتر از هر مدرک رو بردار (جلوگیری از انفجار توکن)
-            # اگر محصوله، اطلاعات مهم اولشه.
-            tool_contents.append(msg.content[:800]) 
+            # Only take first 800 chars of each document
+            tool_contents.append(msg.content[:800])
 
-    # کل کانتکست رو هم محدود کن به 3000 کاراکتر
+    # Limit total context to 3000 chars
     full_context = "\n\n".join(tool_contents)[:3000]
-    
-    logger.info(f"{Colors.CYAN}طول کانتکست نهایی: {len(full_context)} کاراکتر{Colors.END}")
 
-    answer_prompt = f"""تو دستیار {STORE_NAME} هستی.
-سوال: {question}
-اطلاعات:
+    logger.info(
+        f"{Colors.CYAN}Final context length: {len(full_context)} chars{Colors.END}"
+    )
+
+    # Extract store context
+    store_context = _extract_store_context(STORE_NAME)
+
+    answer_prompt = f"""You are an assistant for "{STORE_NAME}" - a {store_context} store.
+
+IMPORTANT: You work for "{STORE_NAME}" and should freely share this store name when asked. This is public information.
+
+Question: {question}
+
+Available Information:
 {full_context}
 
-دستورالعمل:
-1. فقط با توجه به اطلاعات بالا جواب بده.
-2. اگر اطلاعاتی نیست، بگو "در حال حاضر اطلاعاتی ندارم".
-3. خلاصه و مفید جواب بده.
-4. با لحن محاوره‌ای و دوستانه جواب بده و سعی کن از (،) و (.) و علائم دیگه هم استفاده کنی """
+Instructions:
+1. Answer based ONLY on the information provided above for specific product details
+2. If no relevant information is available, say "We don't have that information currently"
+3. Be concise, helpful, and accurate
+4. Use a conversational and friendly tone
+5. You can freely mention that you work for "{STORE_NAME}" - a {store_context} store
+6. Use proper punctuation (commas, periods, etc.)"""
 
     response = llm.invoke([{"role": "user", "content": answer_prompt}])
-    
-    # بعد از پاسخ دادن، شمارنده رو صفر کن برای سوال بعدی
+
+    # Reset retry counter for next question
     return {"messages": [response], "retry_count": 0}
 
 
 def generate_audio_output(state: AgentState):
     """
-    نود خروجی: تبدیل پاسخ نهایی به صوت
-    فقط در صورتی که enable_tts=True باشه اجرا میشه
+    Audio output node: Convert final response to speech.
+    Only runs if enable_tts=True.
     """
-    
-    # چک کردن فعال بودن TTS
     if not state.get("enable_tts", False):
-        log_step("TTS", "خروجی صوتی غیرفعال است")
+        log_step("TTS", "Audio output disabled")
         return {}
-    
-    # پیدا کردن آخرین پاسخ AI
+
+    # Find last AI message
     last_ai_message = None
     for msg in reversed(state["messages"]):
         if isinstance(msg, AIMessage):
             last_ai_message = msg
             break
-    
+
     if not last_ai_message or not last_ai_message.content:
-        log_warning("پیامی برای تبدیل به صوت یافت نشد")
+        log_warning("No message to convert to audio")
         return {}
-    
-    log_step("TTS", "🔊 شروع تولید خروجی صوتی...")
-    
-    # تبدیل به صوت
+
+    log_step("TTS", "🔊 Generating audio output...")
+
+    # Convert to speech
     audio_path = text_to_speech(
         text=last_ai_message.content,
         model="gemini-2.5-flash-preview-tts",
-        add_emotion=True  # لحن دوستانه
+        add_emotion=True,
     )
-    
+
     if audio_path:
         return {"audio_output_path": audio_path}
-    
+
     return {}
 
 
 # ============================================
-# بخش 6: ساخت Graph
+# Graph Construction
 # ============================================
 def create_agent_graph(p_tool, a_tool):
+    """
+    Construct the LangGraph workflow.
+    
+    Flow:
+    START -> check_audio -> generate_query_or_respond -> [retrieve OR audio_output OR END]
+    retrieve -> grade_documents -> [generate_answer OR rewrite_question]
+    generate_answer -> [audio_output OR END]
+    rewrite_question -> generate_query_or_respond
+    """
     global products_tool, articles_tool
     products_tool = p_tool
     articles_tool = a_tool
 
     workflow = StateGraph(AgentState)
-    
+
+    # Add nodes
     workflow.add_node("check_audio", check_audio_input)
     workflow.add_node("generate_query_or_respond", generate_query_or_respond)
     workflow.add_node("retrieve", ToolNode([products_tool, articles_tool]))
     workflow.add_node("rewrite_question", rewrite_question)
     workflow.add_node("generate_answer", generate_answer)
-    workflow.add_node("audio_output", generate_audio_output)# 🆕 نود جدید TTS
+    workflow.add_node("audio_output", generate_audio_output)
 
+    # Add edges
     workflow.add_edge(START, "check_audio")
     workflow.add_edge("check_audio", "generate_query_or_respond")
-    
-    # 🔴 اصلاح مهم اینجاست:
-    # اگر ابزار خواست -> برو retrieve
-    # اگر تمام شد (پاسخ مستقیم داد) -> برو audio_output (نه END)
+
+    # Custom router after query generation
     workflow.add_conditional_edges(
-        "generate_query_or_respond", 
-        tools_condition, 
-        {"tools": "retrieve", END: "audio_output"} 
+        "generate_query_or_respond",
+        custom_router,
+        {"retrieve": "retrieve", "audio_output": "audio_output", END: END},
     )
-    
+
     workflow.add_conditional_edges("retrieve", grade_documents)
-    
-    workflow.add_edge("generate_answer", "audio_output")
-    workflow.add_edge("audio_output", END) # پایان واقعی اینجاست
+
+    # Conditional routing after answer
+    workflow.add_conditional_edges(
+        "generate_answer",
+        route_after_answer,
+        {"audio_output": "audio_output", END: END},
+    )
+
+    workflow.add_edge("audio_output", END)
     workflow.add_edge("rewrite_question", "generate_query_or_respond")
 
+    # Compile with memory
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)
 
+
 # """
-# Store Assistant RAG Agent - Logic Core
-# این فایل فقط شامل منطق هوش مصنوعی، گراف و ابزارهاست.
-# هیچ UI یا سروری در این فایل اجرا نمی‌شود.
+# Store Assistant RAG Agent - Logic Core (Optimized)
+# بهینه شده برای کاهش مصرف توکن و جلوگیری از حلقه‌های بی‌پایان.
 # """
 
 # import os
@@ -409,8 +588,9 @@ def create_agent_graph(p_tool, a_tool):
 #     HumanMessage,
 #     AIMessage,
 #     trim_messages,
+#     BaseMessage,
 # )
-# from langchain_core.tools import tool  # <--- این مهمه: ایمپورت tool
+# from langchain_core.tools import tool
 # from langgraph.graph import StateGraph, MessagesState, START, END
 # from langgraph.prebuilt import ToolNode, tools_condition
 # from langgraph.checkpoint.memory import MemorySaver
@@ -418,17 +598,72 @@ def create_agent_graph(p_tool, a_tool):
 
 # try:
 #     from config import *
+#     from tts_handler import text_to_speech  # 🆕 اضافه کن
+
 # except ImportError:
 #     from src.config import *
+#     from src.tts_handler import text_to_speech  # 🆕 اضافه کن
 
 
+# # ============================================
+# # متغیرهای سراسری
+# # ============================================
 # products_tool = None
 # articles_tool = None
+
+
 # # ============================================
-# # تعریف State
+# # تعریف State (بهینه شده)
 # # ============================================
 # class AgentState(MessagesState):
+#     """State با قابلیت دریافت فایل صوتی و شمارش تلاش‌ها"""
+
 #     audio_path: Optional[str] = None
+#     audio_output_path: Optional[str] = None  # 🆕 برای خروجی صوتی
+#     enable_tts: bool = False  # 🆕 کنترل فعال/غیرفعال
+#     retry_count: int = 0
+
+
+# # ============================================
+# # توابع کمکی (Helper Functions)
+# # ============================================
+# def get_trimmed_history(messages: list[BaseMessage], max_tokens=2000):
+#     """
+#     تاریخچه را به شدت کوتاه می‌کند تا در هزینه صرفه‌جویی شود.
+#     فقط سیستم پرامپت + چند پیام آخر را نگه می‌دارد.
+#     """
+#     return trim_messages(
+#         messages,
+#         max_tokens=max_tokens,
+#         strategy="last",
+#         token_counter=len,  # شمارش حدودی بر اساس تعداد پیام
+#         include_system=True,
+#         start_on="human",
+#     )
+
+
+# def custom_router(state):
+#     # ۱. فراخوانی تابع اصلی tools_condition (طبق خواسته شما)
+#     # این تابع چک می‌کند آیا مدل درخواست ابزار (Tool Call) داده است یا خیر
+#     decision = tools_condition(state)
+
+#     # ۲. اگر تصمیم "tools" بود، یعنی باید به نود retrieve برویم
+#     if decision == "tools":
+#         return "retrieve"
+
+#     # ۳. اگر تصمیم END بود (یعنی پاسخ متنی است)، حالا شرط TTS را چک می‌کنیم
+#     if state.get("enable_tts", False):
+#         return "audio_output"
+
+#     # ۴. در غیر این صورت پایان
+#     return END
+
+
+# def route_after_answer(state):
+#     if state.get("enable_tts", False):
+#         return "audio_output"
+#     return END
+
 
 # # ============================================
 # # بخش 1: بارگذاری Vector Stores
@@ -451,43 +686,43 @@ def create_agent_graph(p_tool, a_tool):
 #     log_success("Vector stores بارگذاری شد")
 #     return products_store, articles_store
 
+
 # # ============================================
 # # بخش 2: ساخت Retriever Tools
 # # ============================================
 # def create_retriever_tools(products_store, articles_store):
-#     """ساخت ابزارهای بازیابی (روش صریح با @tool برای رفع ارور TypeError)"""
-    
-#     # تعریف رتریورها
-#     products_retriever = products_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
-#     articles_retriever = articles_store.as_retriever(search_kwargs={"k": RETRIEVAL_K})
+#     # k=2 کردیم که توکن کمتری مصرف بشه (قبلا 3 بود)
+#     products_retriever = products_store.as_retriever(search_kwargs={"k": 2})
+#     articles_retriever = articles_store.as_retriever(search_kwargs={"k": 2})
 
-#     # 1. تعریف ابزار محصولات به صورت تابع صریح
 #     @tool
 #     def products_retriever_tool(query: str):
-#         """ابزار جستجو در محصولات فروشگاه. برای یافتن اطلاعات محصولات، قیمت، موجودی و مشخصات فنی استفاده کن."""
+#         """جستجو در محصولات (موبایل، لپتاپ و...). قیمت و موجودی را برمی‌گرداند."""
 #         return products_retriever.invoke(query)
 
-#     # 2. تعریف ابزار مقالات به صورت تابع صریح
 #     @tool
 #     def articles_retriever_tool(query: str):
-#         """ابزار جستجو در مقالات راهنما. برای راهنمایی خرید، نکات و مشاوره استفاده کن."""
+#         """جستجو در مقالات و راهنمای خرید."""
 #         return articles_retriever.invoke(query)
 
-#     # تنظیم نام دقیق (حیاتی برای مدل زبانی)
 #     products_retriever_tool.name = "products_retriever"
 #     articles_retriever_tool.name = "articles_retriever"
 
 #     return products_retriever_tool, articles_retriever_tool
+
+
 # # ============================================
 # # بخش 3: مدل‌های زبانی
 # # ============================================
 # class GradeDocuments(BaseModel):
-#     binary_score: str = Field(description="امتیاز مرتبط بودن: 'yes' یا 'no'")
+#     binary_score: str = Field(description="'yes' or 'no'")
+
 
 # def gpt_4o_mini():
 #     return ChatOpenAI(
 #         model=CHAT_GPT_MODEL, api_key=API_KEY, base_url=OPENAI_BASE_URL, temperature=0
 #     )
+
 
 # def gemini_2_flash():
 #     return ChatGoogleGenerativeAI(
@@ -498,150 +733,108 @@ def create_agent_graph(p_tool, a_tool):
 #         temperature=0.7,
 #     )
 
-# # ============================================
-# # بخش 4: پردازش صوت (Voice Input)
-# # ============================================
 
-
+# # ============================================
+# # بخش 4: پردازش صوت
+# # ============================================
 # def transcribe_audio_file(file_path: str) -> str:
-#     """تبدیل فایل صوتی به متن با Gemini"""
-
 #     if not file_path or not os.path.exists(file_path):
 #         return ""
-
 #     try:
 #         llm = gemini_2_flash()
-
-#         # تشخیص Mime Type
 #         mime_type = "audio/mp3"
 #         if file_path.endswith(".ogg"):
 #             mime_type = "audio/ogg"
 #         elif file_path.endswith(".wav"):
 #             mime_type = "audio/wav"
+#         elif file_path.endswith(".webm"):
+#             mime_type = "audio/webm"
 
-#         # تبدیل به Base64
 #         with open(file_path, "rb") as audio_file:
 #             audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
 
-#         # Prompt سخت‌گیرانه
-#         strict_prompt = """
-#         وظیفه تو فقط و فقط "Transcription" است.
-#         1. دقیقاً هر کلمه‌ای که می‌شنوی را بنویس.
-#         2. هیچ عبارت اضافه‌ای اضافه نکن.
-#         3. لحن محاوره‌ای گوینده را حفظ کن.
-#         4. فقط متن خالص را برگردان.
-#         """
+#         # پرامپت کوتاه‌تر برای کاهش توکن ورودی جمینای
+#         strict_prompt = (
+#             "فقط متن این صوت را بنویس (Transcription). بدون هیچ توضیح اضافه."
+#         )
 
-#         # ساخت پیام چندوجهی
 #         message = HumanMessage(
 #             content=[
 #                 {"type": "text", "text": strict_prompt},
 #                 {"type": "media", "mime_type": mime_type, "data": audio_b64},
 #             ]
 #         )
-
-#         logger.info(f"{Colors.CYAN}🎤 در حال تبدیل صدا به متن...{Colors.END}")
+#         logger.info(f"{Colors.CYAN}🎤 تبدیل صدا...{Colors.END}")
 #         response = llm.invoke([message])
-
-#         text = response.content.strip()
-#         logger.info(f"{Colors.GREEN}✅ متن استخراج شده: {text}{Colors.END}")
-#         return text
-
+#         return response.content.strip()
 #     except Exception as e:
 #         log_error(f"خطا در تبدیل صدا: {e}")
 #         return ""
 
 
 # def check_audio_input(state: AgentState):
-#     """نود ورودی: بررسی صدا و تبدیل به متن"""
-
 #     audio_path = state.get("audio_path")
-
 #     if audio_path and os.path.exists(audio_path):
-#         log_step("AUDIO", "🎤 دریافت پیام صوتی...")
-
 #         transcribed_text = transcribe_audio_file(audio_path)
-
 #         if transcribed_text:
-#             new_message = HumanMessage(content=transcribed_text)
-#             return {"messages": [new_message], "audio_path": None}
-#         else:
-#             # اگر فایل بود ولی متنی استخراج نشد
 #             return {
-#                 "messages": [HumanMessage(content="متاسفانه نتوانستم صدای شما را بشنوم. لطفا دوباره تلاش کنید.")],
-#                 "audio_path": None
-#             }    
-
-#     log_step("AUDIO", "پیام متنی است (بدون صدا)")
+#                 "messages": [HumanMessage(content=transcribed_text)],
+#                 "audio_path": None,
+#                 "audio_output_path": None,
+#             }
+#         else:
+#             return {
+#                 "messages": [HumanMessage(content="متاسفانه صدا واضح نبود.")],
+#                 "audio_path": None,
+#                 "audio_output_path": None, 
+#             }
 #     return {}
 
 
 # # ============================================
-# # بخش 5: Agent Nodes
+# # بخش 5: Agent Nodes (بهینه شده)
 # # ============================================
 
 
 # def generate_query_or_respond(state: AgentState):
-#     """تصمیم‌گیری: نیاز به RAG یا پاسخ مستقیم"""
+#     """تصمیم‌گیری: جستجو یا پاسخ"""
+#     log_step("QUERY", "تحلیل درخواست...")
 
-#     log_step("QUERY", "تحلیل سوال کاربر...")
+#     # ریست کردن شمارنده در ابتدای هر درخواست جدید کاربر
+#     # (اگر آخرین پیام مال کاربر باشه، یعنی شروع سیکل جدیده)
+#     if isinstance(state["messages"][-1], HumanMessage):
+#         # اما چون State ایمیوتبل نیست، اینجا فقط پاس میدیم، ریست واقعی باید هوشمندتر باشه
+#         # فعلا فرض میکنیم اگر human message دیدیم یعنی کاربر جدید حرف زده
+#         pass
 
-#     # 1. بررسی امنیتی: آیا اصلاً سوالی وجود دارد؟
-#     # این بخش باگ "اولین پیام صوتی" را حل می‌کند
-#     has_user_message = any(isinstance(msg, HumanMessage) for msg in state["messages"])
-    
-#     if not has_user_message:
-#         log_warning("هیچ پیام متنی از کاربر یافت نشد (شاید تبدیل صدا ناموفق بود).")
-#         return {
-#             "messages": [
-#                 AIMessage(content="متاسفانه صدایتان را نشنیدم یا فایل صوتی خالی بود. لطفاً دوباره تلاش کنید یا متن بنویسید.")
-#             ]
-#         }
+#     has_user = any(isinstance(msg, HumanMessage) for msg in state["messages"])
+#     if not has_user:
+#         return {"messages": [AIMessage(content="پیامی دریافت نشد.")]}
 
-#     # ادامه روال عادی...
-#     # llm = gemini_2_flash()
-#     llm = gpt_4o_mini() # توصیه می‌شود برای Tool Calling از GPT استفاده کنید
+#     llm = gpt_4o_mini()
 
-#     system_prompt = f"""تو دستیار هوشمند فروشگاه {STORE_NAME} هستی.
+#     # پرامپت فشرده‌تر برای کاهش توکن
+#     system_prompt = f"""تو دستیار فروشگاه {STORE_NAME} هستی.
+# وظایف: پاسخ به سوالات محصولات، قیمت و موجودی.
+# ابزارها: products_retriever, articles_retriever.
+# قوانین:
+# 1. فقط از ابزارها اطلاعات بگیر.
+# 2. اگر در ابزار نبود، بگو "موجود نداریم" (دروغ نگو).
+# 3. اگر سوال عمومی بود، خودت جواب بده."""
 
-# وظایف تو:
-# - پاسخ به سوالات درباره محصولات (قیمت، مشخصات، موجودی)
-# - ارائه راهنمایی و مشاوره خرید
-# - مقایسه محصولات مختلف
+#     # محدودیت شدید روی تاریخچه (فقط 4-5 پیام آخر)
+#     trimmed_msgs = get_trimmed_history(state["messages"], max_tokens=2000)
+#     messages = [SystemMessage(content=system_prompt)] + trimmed_msgs
 
-# ابزارهای در دسترس:
-# - products_retriever: برای جستجوی محصولات
-# - articles_retriever: برای راهنماها و مشاوره
-
-# مهم:
-# - هیچ‌وقت از دانش داخلی خودت درباره محصولات استفاده نکن
-# - فقط از ابزارها اطلاعات بگیر
-# - اگر اطلاعاتی نداری، صادقانه بگو
-# - در سوالات غیرمرتبط، مسیر گفتگو را به محصولات و خدمات فروشگاه هدایت کن"""
-
-#     # مدیریت حافظه
-#     trimmed_messages = trim_messages(
-#         state["messages"],
-#         max_tokens=1000,
-#         strategy="last",
-#         token_counter=len,
-#         include_system=True,
-#     )
-
-#     # ساخت لیست نهایی پیام‌ها (با SystemMessage که قبلاً اصلاح کردیم)
-#     messages = [SystemMessage(content=system_prompt)] + trimmed_messages
-
-#     log_step("QUERY", "بررسی نیاز به RAG...")
-    
-#     # فراخوانی مدل
-#     response = llm.bind_tools([products_tool, articles_tool]).invoke(messages)
-
-#     # لاگ کردن تصمیم مدل
-#     if hasattr(response, "tool_calls") and response.tool_calls:
-#         tool_names = [tc["name"] for tc in response.tool_calls]
-#         log_step("QUERY", f"نیاز به ابزار: {', '.join(tool_names)}")
+#     # اگر تعداد تلاش‌ها زیاد شده، ابزارها را می‌بندیم که دیگه سرچ نکنه
+#     if state.get("retry_count", 0) >= 2:
+#         log_warning("تعداد تلاش زیاد شد. پاسخ مستقیم بدون ابزار.")
+#         response = llm.invoke(messages)  # بدون ابزار
 #     else:
-#         log_step("QUERY", "پاسخ مستقیم بدون RAG")
+#         if products_tool and articles_tool:
+#             response = llm.bind_tools([products_tool, articles_tool]).invoke(messages)
+#         else:
+#             response = llm.invoke(messages)
 
 #     return {"messages": [response]}
 
@@ -649,161 +842,208 @@ def create_agent_graph(p_tool, a_tool):
 # def grade_documents(
 #     state: AgentState,
 # ) -> Literal["generate_answer", "rewrite_question"]:
-#     """ارزیابی کیفیت اسناد بازیابی شده"""
+#     """کیفیت سنجی با محدودیت حلقه"""
+#     log_step("GRADE", "بررسی مدارک...")
 
-#     log_step("GRADE", "ارزیابی کیفیت مستندات...")
+#     # 1. اگر تعداد تلاش‌ها بیشتر از 1 بار شده، دیگه سخت نگیر و برو جواب بده
+#     # (حتی اگر مدارک عالی نیست، بهتر از هیچیه یا اینکه بگه ندارم)
+#     current_retry = state.get("retry_count", 0)
+#     if current_retry >= 1:
+#         log_warning(f"تلاش {current_retry}: عبور از سخت‌گیری.")
+#         return "generate_answer"
+
+#     tool_msgs = [
+#         msg for msg in state["messages"] if hasattr(msg, "type") and msg.type == "tool"
+#     ]
+#     if not tool_msgs:
+#         return "rewrite_question"
 
 #     llm = gpt_4o_mini()
+#     question = state["messages"][0].content
 
-#     question = None
-#     for msg in reversed(state["messages"]):
-#         if isinstance(msg, HumanMessage):
-#             question = msg.content
-#             break
+#     # فقط 1000 کاراکتر اول مدارک رو برای چک کردن بفرست (صرفه‌جویی)
+#     context_preview = "\n".join([msg.content[:1000] for msg in tool_msgs])
 
-#     tool_contents = []
-#     for msg in state["messages"]:
-#         if hasattr(msg, "content") and hasattr(msg, "type"):
-#             if msg.type == "tool":
-#                 tool_contents.append(msg.content)
+#     grade_prompt = f"""سوال: {question}
+# مدارک: {context_preview}
+# آیا این مدارک به سوال ربط دارند؟ (yes/no)"""
 
-#     context = "\n\n".join(tool_contents) if tool_contents else ""
+#     response = llm.invoke([{"role": "user", "content": grade_prompt}])
 
-#     logger.info(f"{Colors.BLUE}📊 تعداد مستندات: {len(tool_contents)}{Colors.END}")
-#     logger.info(f"{Colors.BLUE}📏 طول context: {len(context)} کاراکتر{Colors.END}")
-
-#     grade_prompt = f"""مستندات بازیابی شده را ارزیابی کن.
-
-# سوال کاربر: {question}
-
-# مستندات: {context}
-
-# آیا این مستندات می‌توانند به سوال پاسخ دهند?
-# - اگر مرتبط و مفید هستند: yes
-# - اگر نامرتبط یا ناکافی هستند: no"""
-
-#     response = llm.with_structured_output(GradeDocuments).invoke(
-#         [{"role": "user", "content": grade_prompt}]
-#     )
-
-#     decision = response.binary_score
-
-#     if decision == "yes":
-#         log_success("مستندات مرتبط است → تولید پاسخ")
+#     if "yes" in response.content.lower():
 #         return "generate_answer"
 #     else:
-#         log_warning("مستندات نامرتبط → بازنویسی سوال")
 #         return "rewrite_question"
 
 
 # def rewrite_question(state: AgentState):
-#     """بازنویسی سوال برای جستجوی بهتر"""
+#     """بازنویسی سوال (با افزایش شمارنده) با پیدا کردن آخرین سوال کاربر"""
+#     log_step("REWRITE", "تلاش مجدد...")
 
-#     log_step("REWRITE", "بازنویسی سوال...")
+#     # افزایش شمارنده
+#     new_count = state.get("retry_count", 0) + 1
 
 #     llm = gpt_4o_mini()
 
-#     question = None
-#     for msg in reversed(state["messages"]):
-#         if isinstance(msg, HumanMessage):
-#             question = msg.content
-#             break
+#     # --- [اصلاح مهم]: پیدا کردن آخرین پیام کاربر ---
+#     # لیست را معکوس می‌کنیم و اولین پیامی که از نوع HumanMessage باشد را می‌گیریم
+#     messages = state["messages"]
+#     last_human_message = next(
+#         (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+#     )
 
-#     logger.info(f"{Colors.YELLOW}❓ سوال قبلی: {question}{Colors.END}")
+#     if last_human_message:
+#         original_q = last_human_message.content
+#     else:
+#         # اگر به هر دلیلی پیدا نشد (که بعید است)، آخرین پیام لیست را بردار
+#         original_q = messages[-1].content
 
-#     prompt = f"""سوال زیر را بهبود ده تا برای جستجو در پایگاه داده بهتر باشد:
+#     # لاگ برای اطمینان از اینکه سوال درست انتخاب شده
+#     logger.info(f"Original Question Found: {original_q}")
 
-# سوال اصلی: {question}
+#     # پرامپت را کمی دقیق‌تر می‌کنیم که بداند هدف جستجوی بهتر است
+#     msg = (
+#         f"سوال زیر را برای جستجو در دیتابیس محصولات بهبود بده و بازنویسی کن. "
+#         f"فقط متن سوال اصلاح شده را بنویس، بدون توضیحات اضافه.\n"
+#         f"سوال اصلی: {original_q}"
+#     )
 
-# فقط سوال بهبود یافته را بنویس، بدون توضیح اضافی."""
+#     response = llm.invoke(msg)
 
-#     response = llm.invoke([{"role": "user", "content": prompt}])
-#     new_question = response.content
+#     logger.info(
+#         f"{Colors.GREEN}سوال بازنویسی شده ({new_count}): {response.content}{Colors.END}"
+#     )
 
-#     logger.info(f"{Colors.GREEN}✏️  سوال جدید: {new_question}{Colors.END}")
-
-#     return {"messages": [HumanMessage(content=new_question)]}
+#     return {
+#         # این پیام جدید به انتهای لیست اضافه می‌شود و ایجنت فکر می‌کند دستور جدیدی است
+#         "messages": [HumanMessage(content=response.content)],
+#         "retry_count": new_count,
+#     }
 
 
 # def generate_answer(state: AgentState):
-#     """تولید پاسخ نهایی"""
-
-#     log_step("ANSWER", "تولید پاسخ نهایی...")
-
+#     """تولید پاسخ نهایی با کانتکست محدود"""
+#     log_step("ANSWER", "تولید پاسخ...")
 #     llm = gpt_4o_mini()
 
-#     question = None
+#     # استخراج سوال اصلی (نه بازنویسی شده‌ها)
+#     # معمولاً اولین HumanMessage سوال اصلیه، یا آخرین قبل از ابزار
+#     question = "سوال کاربر"
 #     for msg in reversed(state["messages"]):
 #         if isinstance(msg, HumanMessage):
 #             question = msg.content
 #             break
 
+#     # جمع‌آوری و محدودسازی مدارک
 #     tool_contents = []
 #     for msg in state["messages"]:
 #         if hasattr(msg, "type") and msg.type == "tool":
-#             tool_contents.append(msg.content)
+#             # فقط 500 کاراکتر از هر مدرک رو بردار (جلوگیری از انفجار توکن)
+#             # اگر محصوله، اطلاعات مهم اولشه.
+#             tool_contents.append(msg.content[:800])
 
-#     context = "\n\n".join(tool_contents)
+#     # کل کانتکست رو هم محدود کن به 3000 کاراکتر
+#     full_context = "\n\n".join(tool_contents)[:3000]
 
 #     logger.info(
-#         f"{Colors.CYAN}💬 تولید پاسخ براساس {len(tool_contents)} مستند{Colors.END}"
+#         f"{Colors.CYAN}طول کانتکست نهایی: {len(full_context)} کاراکتر{Colors.END}"
 #     )
 
-#     answer_prompt = f"""تو دستیار فروشگاه {STORE_NAME} هستی.
-
-# براساس اطلاعات زیر به سوال کاربر پاسخ بده:
-
+#     answer_prompt = f"""تو دستیار {STORE_NAME} هستی.
 # سوال: {question}
-
-# اطلاعات موجود:
-# {context}
+# اطلاعات:
+# {full_context}
 
 # دستورالعمل:
-# - فقط از اطلاعات موجود استفاده کن
-# - اگر اطلاعات کافی نیست، صادقانه بگو
-# - پاسخ را واضح و مختصر بنویس (3-5 جمله)"""
+# 1. فقط با توجه به اطلاعات بالا جواب بده.
+# 2. اگر اطلاعاتی نیست، بگو "در حال حاضر اطلاعاتی ندارم".
+# 3. خلاصه و مفید جواب بده.
+# 4. با لحن محاوره‌ای و دوستانه جواب بده و سعی کن از (،) و (.) و علائم دیگه هم استفاده کنی """
 
 #     response = llm.invoke([{"role": "user", "content": answer_prompt}])
 
-#     answer_length = len(response.content)
-#     logger.info(f"{Colors.GREEN}✅ پاسخ تولید شد ({answer_length} کاراکتر){Colors.END}")
+#     # بعد از پاسخ دادن، شمارنده رو صفر کن برای سوال بعدی
+#     return {"messages": [response], "retry_count": 0}
 
-#     return {"messages": [response]}
+
+# def generate_audio_output(state: AgentState):
+#     """
+#     نود خروجی: تبدیل پاسخ نهایی به صوت
+#     فقط در صورتی که enable_tts=True باشه اجرا میشه
+#     """
+
+#     # چک کردن فعال بودن TTS
+#     if not state.get("enable_tts", False):
+#         log_step("TTS", "خروجی صوتی غیرفعال است")
+#         return {}
+
+#     # پیدا کردن آخرین پاسخ AI
+#     last_ai_message = None
+#     for msg in reversed(state["messages"]):
+#         if isinstance(msg, AIMessage):
+#             last_ai_message = msg
+#             break
+
+#     if not last_ai_message or not last_ai_message.content:
+#         log_warning("پیامی برای تبدیل به صوت یافت نشد")
+#         return {}
+
+#     log_step("TTS", "🔊 شروع تولید خروجی صوتی...")
+
+#     # تبدیل به صوت
+#     audio_path = text_to_speech(
+#         text=last_ai_message.content,
+#         model="gemini-2.5-flash-preview-tts",
+#         add_emotion=True,  # لحن دوستانه
+#     )
+
+#     if audio_path:
+#         return {"audio_output_path": audio_path}
+
+#     return {}
+
+
 # # ============================================
 # # بخش 6: ساخت Graph
 # # ============================================
 # def create_agent_graph(p_tool, a_tool):
-
-#     # دسترسی به متغیرهای سراسری
 #     global products_tool, articles_tool
-    
-#     # مقداردهی متغیرهای سراسری برای استفاده در نودها
 #     products_tool = p_tool
 #     articles_tool = a_tool
 
 #     workflow = StateGraph(AgentState)
-    
+
+#     # --- تعریف نودها (تغییری نکردند) ---
 #     workflow.add_node("check_audio", check_audio_input)
 #     workflow.add_node("generate_query_or_respond", generate_query_or_respond)
 #     workflow.add_node("retrieve", ToolNode([products_tool, articles_tool]))
 #     workflow.add_node("rewrite_question", rewrite_question)
 #     workflow.add_node("generate_answer", generate_answer)
+#     workflow.add_node("audio_output", generate_audio_output)
 
+#     # --- تعریف یال‌ها ---
 #     workflow.add_edge(START, "check_audio")
 #     workflow.add_edge("check_audio", "generate_query_or_respond")
-    
+
+#     # [بخش مهم ۱] استفاده از تابع واسط که tools_condition را در دل خود دارد
 #     workflow.add_conditional_edges(
-#         "generate_query_or_respond", tools_condition, {"tools": "retrieve", END: END}
+#         "generate_query_or_respond",
+#         custom_router,
+#         # تعیین مقصدهای ممکن بر اساس خروجی تابع custom_router
+#         {"retrieve": "retrieve", "audio_output": "audio_output", END: END},
 #     )
+
 #     workflow.add_conditional_edges("retrieve", grade_documents)
-#     workflow.add_edge("generate_answer", END)
+
+#     # [بخش مهم ۲] شرطی کردن خروجی بعد از generate_answer
+#     workflow.add_conditional_edges(
+#         "generate_answer",
+#         route_after_answer,
+#         {"audio_output": "audio_output", END: END},
+#     )
+
+#     workflow.add_edge("audio_output", END)
 #     workflow.add_edge("rewrite_question", "generate_query_or_respond")
 
 #     memory = MemorySaver()
 #     return workflow.compile(checkpointer=memory)
-
-# ============================================
-# حذف کامل بخش Main و Gradio
-# ============================================
-# قبلاً اینجا if __name__ == "__main__" داشتیم که gradio را لانچ می‌کرد.
-# الان این فایل فقط توابع بالا را "تعریف" می‌کند و server.py آن‌ها را "صدا" می‌زند.
