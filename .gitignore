@@ -139,3 +139,4 @@ backend/vector_db/
 
 backend/data/audio/
 backend/src/test.py
+backend/utils/

@@ -45,7 +45,7 @@ ARTICLE_CHUNK_SIZE = 1000
 ARTICLE_CHUNK_OVERLAP = 200
 
 # تنظیمات Retrieval
-RETRIEVAL_K = 3  # تعداد documents برگشتی
+RETRIEVAL_K = 5  # تعداد documents برگشتی
 
 # نام فروشگاه
 STORE_NAME = "موبایل استقلال"

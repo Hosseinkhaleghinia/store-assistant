@@ -109,6 +109,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isLastMes
             : 'bg-gray-50 text-gray-800 rounded-tl-none border border-gray-200'}
         `}>
           
+          {/* Audio Player */}
+          {message.audioUrl && (
+            <ChatMessageAudio audioUrl={message.audioUrl} autoPlay={isLastMessage && !isUser} />
+          )}
           <div className="markdown-body">
             {isUser ? (
                <p className="whitespace-pre-wrap">{message.content}</p>
@@ -126,11 +130,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isLastMes
                </ReactMarkdown>
             )}
           </div>
-          
-          {/* Audio Player */}
-          {message.audioUrl && (
-            <ChatMessageAudio audioUrl={message.audioUrl} autoPlay={isLastMessage && !isUser} />
-          )}
 
           {/* Actions (Visible on Hover) */}
           {!isUser && (

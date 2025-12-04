@@ -63,7 +63,7 @@ export const ChatMessageAudio: React.FC<ChatMessageAudioProps> = ({ audioUrl, au
   };
 
   return (
-    <div className="mt-3 p-2 bg-gray-100 rounded-lg flex items-center gap-3 w-full max-w-xs border border-gray-200">
+    <div className="mb-3 p-2 bg-gray-100 rounded-lg flex items-center gap-3 w-full max-w-xs border border-gray-200">
       <audio ref={audioRef} src={audioUrl} preload="metadata"></audio>
       <button 
         onClick={togglePlayPause} 
