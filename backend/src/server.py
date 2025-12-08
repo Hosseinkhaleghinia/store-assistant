@@ -16,13 +16,13 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 from dotenv import load_dotenv
 
-from src.rag_agent import (
+from rag_agent import (
     load_vector_stores, 
     create_retriever_tools, 
     create_agent_graph, 
     transcribe_audio_file
 )
-from src.config import Colors
+from config import Colors
 
 # Load environment variables
 load_dotenv()
